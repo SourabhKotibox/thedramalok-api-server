@@ -131,29 +131,44 @@ export const createPlanLimit = async (request: FastifyRequest, reply: FastifyRep
       return reply.status(400).send({ success: false, error: 'Plan ID is required' });
     }
 
-    const existing = await PlanLimitModel.findOne({ planId });
-    if (existing) {
-      return reply.status(400).send({ success: false, error: 'Plan limit for this plan already exists' });
+    let planLimit = await PlanLimitModel.findOne({ planId });
+    if (planLimit) {
+      planLimit.videoCast = !!videoCast;
+      planLimit.ads = !!ads;
+      planLimit.deviceLimit = !!deviceLimit;
+      planLimit.deviceLimitCount = deviceLimitCount !== undefined ? parseInt(deviceLimitCount, 10) : 1;
+      planLimit.downloadStatus = !!downloadStatus;
+      planLimit.supportedDeviceType = !!supportedDeviceType;
+      planLimit.supportedDevices = supportedDevices || [];
+      planLimit.profileLimit = !!profileLimit;
+      planLimit.profileLimitCount = profileLimitCount !== undefined ? parseInt(profileLimitCount, 10) : 1;
+      planLimit.q480p = !!q480p;
+      planLimit.q720p = !!q720p;
+      planLimit.q1080p = !!q1080p;
+      planLimit.q1440p = !!q1440p;
+      planLimit.q2k = !!q2k;
+      planLimit.q4k = !!q4k;
+      await planLimit.save();
+    } else {
+      planLimit = await PlanLimitModel.create({
+        planId,
+        videoCast: !!videoCast,
+        ads: !!ads,
+        deviceLimit: !!deviceLimit,
+        deviceLimitCount: deviceLimitCount !== undefined ? parseInt(deviceLimitCount, 10) : 1,
+        downloadStatus: !!downloadStatus,
+        supportedDeviceType: !!supportedDeviceType,
+        supportedDevices: supportedDevices || [],
+        profileLimit: !!profileLimit,
+        profileLimitCount: profileLimitCount !== undefined ? parseInt(profileLimitCount, 10) : 1,
+        q480p: !!q480p,
+        q720p: !!q720p,
+        q1080p: !!q1080p,
+        q1440p: !!q1440p,
+        q2k: !!q2k,
+        q4k: !!q4k,
+      });
     }
-
-    const planLimit = await PlanLimitModel.create({
-      planId,
-      videoCast: !!videoCast,
-      ads: !!ads,
-      deviceLimit: !!deviceLimit,
-      deviceLimitCount: deviceLimitCount !== undefined ? parseInt(deviceLimitCount, 10) : 1,
-      downloadStatus: !!downloadStatus,
-      supportedDeviceType: !!supportedDeviceType,
-      supportedDevices: supportedDevices || [],
-      profileLimit: !!profileLimit,
-      profileLimitCount: profileLimitCount !== undefined ? parseInt(profileLimitCount, 10) : 1,
-      q480p: !!q480p,
-      q720p: !!q720p,
-      q1080p: !!q1080p,
-      q1440p: !!q1440p,
-      q2k: !!q2k,
-      q4k: !!q4k,
-    });
 
     return reply.status(201).send({
       success: true,

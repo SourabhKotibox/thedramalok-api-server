@@ -8,13 +8,15 @@ import { SettingsModel } from '../models/Settings';
 // Helper function to get settings from database
 export async function getS3Settings() {
   const settings = await SettingsModel.findOne();
+  const rawDriver = settings?.storageDriver || 'local';
+  const isS3 = rawDriver === 's3' || rawDriver === 'aws';
   return {
     accessKeyId: settings?.awsAccessKeyId || process.env.AWS_S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || '',
     secretAccessKey: settings?.awsSecretAccessKey || process.env.AWS_S3_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || '',
     region: settings?.awsRegion || process.env.AWS_S3_REGION || process.env.AWS_REGION || 'us-east-1',
     bucket: settings?.awsBucket || process.env.AWS_S3_BUCKET_NAME || process.env.AWS_BUCKET_NAME || 'tripleminds-ott-admin',
     pathStyle: settings?.awsPathStyleEndpoint || false,
-    storageDriver: settings?.storageDriver || 'local'
+    storageDriver: isS3 ? 's3' : rawDriver
   };
 }
 

@@ -1,10 +1,13 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import mongoose from 'mongoose';
 import { UserModel } from '../models/User';
+import { SubscriptionPlanModel } from '../models/SubscriptionPlan';
+import { PlanLimitModel } from '../models/PlanLimit';
 import { MovieModel } from '../models/Movie';
 import { ContentModel } from '../models/Content';
 import { EpisodeModel } from '../models/Episode';
 import { UserDownloadModel } from '../models/UserDownload';
+import { resolveUserPlanAndLimits } from '../lib/planHelper';
 import { logger } from '../lib/logger';
 import { isS3Configured, getS3PublicUrl } from '../lib/s3';
 
@@ -50,15 +53,18 @@ export const requestDownload = async (request: FastifyRequest, reply: FastifyRep
     // Cast userId string to ObjectId for all DB queries
     const userObjectId = new mongoose.Types.ObjectId(userId);
 
-    // Check user subscription status
-    const user = await UserModel.findById(userObjectId).select('subscriptionStatus subscriptionExpiry').lean();
+    // Check user subscription status and download permission
+    const user = await UserModel.findById(userObjectId).lean();
     if (!user) {
       return reply.status(404).send({ success: false, message: 'User not found' });
     }
 
-    const isActive = user.subscriptionStatus === 'active' && (!user.subscriptionExpiry || user.subscriptionExpiry > new Date());
+    const { isActive, downloadAllowed } = await resolveUserPlanAndLimits(user);
     if (!isActive) {
       return reply.status(403).send({ success: false, message: 'Active subscription required to download content.' });
+    }
+    if (!downloadAllowed) {
+      return reply.status(403).send({ success: false, message: 'Downloading is disabled on your current subscription plan.' });
     }
 
     const { contentId, episodeId, contentType } = request.body as {

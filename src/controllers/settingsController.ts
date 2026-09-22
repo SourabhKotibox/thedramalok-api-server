@@ -3,6 +3,7 @@ import { SettingsModel } from '../models/Settings';
 import uploadHandler from '../lib/uploadHandler';
 import { updateEnvFile } from '../lib/envUpdater';
 import { sendWelcomeEmail } from '../lib/email';
+import { storageService } from '../services/storage';
 
 async function getOrCreateSettings() {
   let settings = await SettingsModel.findOne();
@@ -31,16 +32,35 @@ export const getSettings = async (request: FastifyRequest, reply: FastifyReply) 
     }
 
     if (isAdmin) {
+      const adminSettings = settings.toObject ? settings.toObject() : { ...settings };
+      // Mask raw secret keys for security - never send plain secret keys over API
+      if (adminSettings.awsSecretAccessKey) {
+        adminSettings.awsSecretAccessKey = '••••••••';
+      }
+      if (adminSettings.doSpacesSecretKey) {
+        adminSettings.doSpacesSecretKey = '••••••••';
+      }
+      if (adminSettings.doSecretKey) {
+        adminSettings.doSecretKey = '••••••••';
+      }
+      if (adminSettings.digitalOceanSecretKey) {
+        adminSettings.digitalOceanSecretKey = '••••••••';
+      }
+
       return reply.send({
         success: true,
-        data: settings
+        data: adminSettings
       });
     } else {
       // Filter out sensitive fields for public settings
       const publicSettings = settings.toObject ? settings.toObject() : { ...settings };
       const sensitiveFields = [
         'mailEmail', 'mailDriver', 'mailHost', 'mailPort', 'mailEncryption', 'mailUsername', 'mailPassword', 'mailFrom', 'mailFromName',
-        'awsAccessKeyId', 'awsSecretAccessKey', 'awsRegion', 'awsBucket', 'awsPathStyleEndpoint', 'bunnyStorageZone', 'bunnyAccessKey',
+        'awsAccessKeyId', 'awsSecretAccessKey', 'awsRegion', 'awsBucket', 'awsPathStyleEndpoint',
+        'doSpacesAccessKey', 'doSpacesSecretKey', 'doSpacesRegion', 'doSpacesBucket', 'doSpacesEndpoint',
+        'doSpaceName', 'doRegion', 'doAccessKey', 'doSecretKey', 'doEndpoint',
+        'digitalOceanSpaceName', 'digitalOceanRegion', 'digitalOceanAccessKey', 'digitalOceanSecretKey', 'digitalOceanEndpoint',
+        'bunnyStorageZone', 'bunnyAccessKey',
         'fcmServerKey', 'fcmSenderId', 'firebaseApiKey', 'firebaseProjectId', 'firebaseAppId'
       ];
       for (const field of sensitiveFields) {
@@ -59,7 +79,53 @@ export const getSettings = async (request: FastifyRequest, reply: FastifyReply) 
 
 export const updateSettings = async (request: FastifyRequest, reply: FastifyReply) => {
   try {
-    const body = request.body as Record<string, any>;
+    const body = { ...(request.body as Record<string, any>) };
+    const existingSettings = await getOrCreateSettings();
+
+    // If storageDriver is provided or being changed, validate configuration
+    if (body.storageDriver !== undefined) {
+      const validation = storageService.validateProviderConfig(
+        body.storageDriver,
+        body,
+        existingSettings.toObject ? existingSettings.toObject() : existingSettings
+      );
+      if (!validation.valid) {
+        return reply.status(400).send({
+          success: false,
+          error: validation.error || 'Invalid storage configuration',
+        });
+      }
+    }
+
+    // Do not overwrite secret keys if masked or blank
+    if (body.awsSecretAccessKey === '••••••••' || body.awsSecretAccessKey === '') {
+      delete body.awsSecretAccessKey;
+    }
+    if (body.awsSecretKey === '••••••••' || body.awsSecretKey === '') {
+      delete body.awsSecretKey;
+    }
+    if (body.doSpacesSecretKey === '••••••••' || body.doSpacesSecretKey === '') {
+      delete body.doSpacesSecretKey;
+    }
+    if (body.doSecretKey === '••••••••' || body.doSecretKey === '') {
+      delete body.doSecretKey;
+    }
+    if (body.digitalOceanSecretKey === '••••••••' || body.digitalOceanSecretKey === '') {
+      delete body.digitalOceanSecretKey;
+    }
+
+    // Normalize and alias DigitalOcean fields
+    if (body.doSpaceName && !body.doSpacesBucket) body.doSpacesBucket = body.doSpaceName;
+    if (body.digitalOceanSpaceName && !body.doSpacesBucket) body.doSpacesBucket = body.digitalOceanSpaceName;
+    if (body.doRegion && !body.doSpacesRegion) body.doSpacesRegion = body.doRegion;
+    if (body.digitalOceanRegion && !body.doSpacesRegion) body.doSpacesRegion = body.digitalOceanRegion;
+    if (body.doAccessKey && !body.doSpacesAccessKey) body.doSpacesAccessKey = body.doAccessKey;
+    if (body.digitalOceanAccessKey && !body.doSpacesAccessKey) body.doSpacesAccessKey = body.digitalOceanAccessKey;
+    if (body.doSecretKey && !body.doSpacesSecretKey) body.doSpacesSecretKey = body.doSecretKey;
+    if (body.digitalOceanSecretKey && !body.doSpacesSecretKey) body.doSpacesSecretKey = body.digitalOceanSecretKey;
+    if (body.doEndpoint && !body.doSpacesEndpoint) body.doSpacesEndpoint = body.doEndpoint;
+    if (body.digitalOceanEndpoint && !body.doSpacesEndpoint) body.doSpacesEndpoint = body.digitalOceanEndpoint;
+
     const settings = await SettingsModel.findOneAndUpdate(
       {},
       { $set: body },
@@ -75,6 +141,39 @@ export const updateSettings = async (request: FastifyRequest, reply: FastifyRepl
     if (body.mailPassword !== undefined && body.mailPassword) envUpdates.EMAIL_PASS = body.mailPassword;
     if (body.mailFrom !== undefined)     envUpdates.EMAIL_FROM     = body.mailFrom;
     if (body.mailFromName !== undefined) envUpdates.EMAIL_FROM_NAME = body.mailFromName;
+
+    // Sync Storage configuration to .env if updated
+    if (body.storageDriver !== undefined) {
+      envUpdates.STORAGE_DRIVER = body.storageDriver;
+    }
+    if (body.awsAccessKeyId !== undefined && body.awsAccessKeyId) {
+      envUpdates.AWS_ACCESS_KEY_ID = body.awsAccessKeyId;
+    }
+    if (body.awsSecretAccessKey !== undefined && body.awsSecretAccessKey) {
+      envUpdates.AWS_SECRET_ACCESS_KEY = body.awsSecretAccessKey;
+    }
+    if (body.awsRegion !== undefined && body.awsRegion) {
+      envUpdates.AWS_REGION = body.awsRegion;
+    }
+    if (body.awsBucket !== undefined && body.awsBucket) {
+      envUpdates.AWS_S3_BUCKET = body.awsBucket;
+    }
+
+    if (body.doSpacesAccessKey !== undefined && body.doSpacesAccessKey) {
+      envUpdates.DO_SPACES_ACCESS_KEY = body.doSpacesAccessKey;
+    }
+    if (body.doSpacesSecretKey !== undefined && body.doSpacesSecretKey) {
+      envUpdates.DO_SPACES_SECRET_KEY = body.doSpacesSecretKey;
+    }
+    if (body.doSpacesRegion !== undefined && body.doSpacesRegion) {
+      envUpdates.DO_SPACES_REGION = body.doSpacesRegion;
+    }
+    if (body.doSpacesBucket !== undefined && body.doSpacesBucket) {
+      envUpdates.DO_SPACES_BUCKET = body.doSpacesBucket;
+    }
+    if (body.doSpacesEndpoint !== undefined && body.doSpacesEndpoint) {
+      envUpdates.DO_SPACES_ENDPOINT = body.doSpacesEndpoint;
+    }
 
     if (Object.keys(envUpdates).length > 0) {
       updateEnvFile(envUpdates);

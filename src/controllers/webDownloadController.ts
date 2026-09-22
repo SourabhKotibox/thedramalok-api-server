@@ -1,9 +1,13 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import mongoose from 'mongoose';
+import { UserModel } from '../models/User';
+import { SubscriptionPlanModel } from '../models/SubscriptionPlan';
+import { PlanLimitModel } from '../models/PlanLimit';
 import { MovieModel } from '../models/Movie';
 import { ContentModel } from '../models/Content';
 import { EpisodeModel } from '../models/Episode';
 import { UserDownloadModel } from '../models/UserDownload';
+import { resolveUserPlanAndLimits } from '../lib/planHelper';
 import { logger } from '../lib/logger';
 import { isS3Configured, getS3PublicUrl } from '../lib/s3';
 
@@ -47,6 +51,23 @@ export const webRequestDownload = async (request: FastifyRequest, reply: Fastify
     }
     const userObjectId = new mongoose.Types.ObjectId(userId);
 
+    // Verify user's plan permission
+    const user = await UserModel.findById(userObjectId).lean();
+    if (user) {
+      const { isActive, plan, downloadAllowed } = await resolveUserPlanAndLimits(user);
+      if (isActive && plan) {
+        if (!downloadAllowed) {
+          return reply.status(403).send({ success: false, message: 'Downloading is disabled on your current subscription plan.' });
+        }
+      } else {
+        // Check if any plan allows downloading
+        const anyLimit = await PlanLimitModel.findOne({ downloadStatus: true }).lean();
+        if (!anyLimit) {
+          return reply.status(403).send({ success: false, message: 'Downloading is currently disabled.' });
+        }
+      }
+    }
+
     const { contentId, episodeId, contentType, profileId } = (request.body || {}) as {
       contentId: string;
       episodeId?: string;
@@ -78,35 +99,50 @@ export const webRequestDownload = async (request: FastifyRequest, reply: Fastify
       if (!movie || movie.status !== 'published') {
         return reply.status(404).send({ success: false, message: 'Movie not found' });
       }
+      if (movie.downloadAllowed === false) {
+        return reply.status(400).send({ success: false, message: 'Downloading is disabled for this movie.' });
+      }
       title = movie.title;
       thumbnail = toAbsoluteUrl(request, (movie as any).thumbnail || '', s3Active, s3BaseUrl) || '';
       duration = (movie as any).duration || 0;
       downloadUrl = toAbsoluteUrl(request, (movie as any).videoUrl || (movie as any).hlsUrl || '', s3Active, s3BaseUrl) || '';
       contentModelType = 'Movie';
 
+      const contentObjectId = new mongoose.Types.ObjectId(contentId);
       downloadDoc = await UserDownloadModel.findOneAndUpdate(
-        { userId: userObjectId, contentId, episodeId: null, profileId: profileId || null },
+        { userId: userObjectId, contentId: contentObjectId, episodeId: null, profileId: profileId || null },
         { $setOnInsert: { contentModelType } },
-        { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+        { upsert: true, new: true, returnDocument: 'after', setDefaultsOnInsert: true }
       );
     } else {
-      if (!episodeId || !mongoose.Types.ObjectId.isValid(episodeId)) {
-        return reply.status(400).send({ success: false, message: 'episodeId is required for drama/series content' });
-      }
-
-      const [content, episode] = await Promise.all([
-        ContentModel.findById(contentId).lean(),
-        EpisodeModel.findById(episodeId).lean(),
-      ]);
+      const contentObjectId = new mongoose.Types.ObjectId(contentId);
+      const content = await ContentModel.findById(contentObjectId).lean();
 
       if (!content || content.status !== 'published') {
         return reply.status(404).send({ success: false, message: 'Content not found' });
       }
-      if (!episode || episode.processingStatus !== 'ready') {
-        return reply.status(404).send({ success: false, message: 'Episode not found or not ready' });
+      if (content.downloadAllowed === false) {
+        return reply.status(400).send({ success: false, message: 'Downloading is disabled for this content.' });
       }
 
-      title = episode.title;
+      let episode: any = null;
+      if (episodeId && mongoose.Types.ObjectId.isValid(episodeId)) {
+        episode = await EpisodeModel.findById(episodeId).lean();
+      } else {
+        // Fallback to first ready episode
+        episode = await EpisodeModel.findOne({ contentId: contentObjectId, processingStatus: 'ready' }).sort({ season: 1, episode: 1, createdAt: 1 }).lean()
+          || await EpisodeModel.findOne({ contentId: contentObjectId }).sort({ season: 1, episode: 1, createdAt: 1 }).lean();
+      }
+
+      if (!episode) {
+        return reply.status(404).send({ success: false, message: 'No episodes available for this content' });
+      }
+      if (episode.downloadAllowed === false) {
+        return reply.status(400).send({ success: false, message: 'Downloading is disabled for this episode.' });
+      }
+
+      const episodeObjectId = new mongoose.Types.ObjectId(episode._id);
+      title = episode.title || content.title;
       parentTitle = content.title;
       thumbnail = toAbsoluteUrl(request, (episode as any).thumbnail || (content as any).thumbnail || '', s3Active, s3BaseUrl) || '';
       duration = (episode as any).duration || 0;
@@ -114,9 +150,9 @@ export const webRequestDownload = async (request: FastifyRequest, reply: Fastify
       contentModelType = 'Content';
 
       downloadDoc = await UserDownloadModel.findOneAndUpdate(
-        { userId: userObjectId, contentId, episodeId, profileId: profileId || null },
+        { userId: userObjectId, contentId: contentObjectId, episodeId: episodeObjectId, profileId: profileId || null },
         { $setOnInsert: { contentModelType } },
-        { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+        { upsert: true, new: true, returnDocument: 'after', setDefaultsOnInsert: true }
       );
     }
 
@@ -127,7 +163,7 @@ export const webRequestDownload = async (request: FastifyRequest, reply: Fastify
     return reply.send({
       success: true,
       data: {
-        id: downloadDoc._id.toString(),
+        id: downloadDoc?._id?.toString() || new mongoose.Types.ObjectId().toString(),
         contentId,
         episodeId: episodeId || null,
         contentType,
@@ -165,7 +201,11 @@ export const webGetDownloads = async (request: FastifyRequest, reply: FastifyRep
     }
 
     const { profileId } = request.query as { profileId?: string };
-    const downloads = await UserDownloadModel.find({ userId: userObjectId, profileId: profileId || null }).sort({ createdAt: -1 }).lean();
+    const profileFilter = (!profileId || profileId === 'main')
+      ? { $or: [{ profileId: null }, { profileId: 'main' }, { profileId: { $exists: false } }] }
+      : { $or: [{ profileId }, { profileId: null }, { profileId: 'main' }] };
+
+    const downloads = await UserDownloadModel.find({ userId: userObjectId, ...profileFilter }).sort({ createdAt: -1 }).lean();
     const result = [];
 
     for (const dl of downloads) {
@@ -179,7 +219,8 @@ export const webGetDownloads = async (request: FastifyRequest, reply: FastifyRep
           contentType: 'movie',
           title: (movie as any).title,
           parentTitle: '',
-          thumbnail: toAbsoluteUrl(request, (movie as any).thumbnail || '', s3Active, s3BaseUrl) || '',
+          thumbnail: toAbsoluteUrl(request, (movie as any).thumbnail || (movie as any).posterImage || (movie as any).bannerImage || '', s3Active, s3BaseUrl) || '',
+          poster: toAbsoluteUrl(request, (movie as any).posterImage || (movie as any).thumbnail || '', s3Active, s3BaseUrl) || '',
           duration: (movie as any).duration || 0,
           downloadUrl: toAbsoluteUrl(request, (movie as any).videoUrl || (movie as any).hlsUrl || '', s3Active, s3BaseUrl) || '',
           createdAt: dl.createdAt,
@@ -198,6 +239,7 @@ export const webGetDownloads = async (request: FastifyRequest, reply: FastifyRep
           title: episode.title,
           parentTitle: content.title,
           thumbnail: toAbsoluteUrl(request, (episode as any).thumbnail || (content as any).thumbnail || '', s3Active, s3BaseUrl) || '',
+          poster: toAbsoluteUrl(request, (content as any).posterImage || (episode as any).thumbnail || '', s3Active, s3BaseUrl) || '',
           duration: (episode as any).duration || 0,
           downloadUrl: toAbsoluteUrl(request, (episode as any).sourceVideoUrl || (episode as any).hlsUrl || '', s3Active, s3BaseUrl) || '',
           createdAt: dl.createdAt,

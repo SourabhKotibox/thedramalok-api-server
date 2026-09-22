@@ -52,7 +52,6 @@ const UserSchema = new Schema<IUser>(
     passwordHash: String,
     subscriptionPlan: {
       type: String,
-      enum: ['free', 'basic', 'standard', 'premium'],
       default: 'free',
     },
     subscriptionStatus: {

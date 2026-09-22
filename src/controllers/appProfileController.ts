@@ -16,6 +16,7 @@ import { EpisodeModel } from '../models/Episode';
 import { UserWatchProgressModel } from '../models/UserWatchProgress';
 import { ReviewModel } from '../models/Review';
 import { SubscriptionModel } from '../models/Subscription';
+import { resolveUserPlanAndLimits } from '../lib/planHelper';
 import { logger } from '../lib/logger';
 import uploadHandler from '../lib/uploadHandler';
 
@@ -119,17 +120,12 @@ export const getAppProfile = async (request: FastifyRequest, reply: FastifyReply
         const prefix = appName.substring(0, 4).toUpperCase();
         const displayId = `${prefix}${String(userNumber).padStart(4, '0')}`;
 
-        const plan = await SubscriptionPlanModel.findOne({ name: user.subscriptionPlan }).lean();
-        let profileLimitCount = 1;
-        if (plan) {
-          const limit = await PlanLimitModel.findOne({ planId: plan._id }).lean();
-          if (limit) {
-            profileLimitCount = limit.profileLimitCount;
-          }
-        }
-
-        const isActive = user.subscriptionStatus === 'active' && 
-                         (!user.subscriptionExpiry || user.subscriptionExpiry > new Date());
+        const {
+          isActive,
+          plan,
+          downloadAllowed,
+          profileLimitCount,
+        } = await resolveUserPlanAndLimits(user);
 
         userProfile = {
           id: user._id.toString(),
@@ -140,7 +136,9 @@ export const getAppProfile = async (request: FastifyRequest, reply: FastifyReply
           avatar: (user as any).avatar || null,
           subscription: isActive,
           subscriptionStatus: isActive ? 'active' : 'inactive',
-          subscriptionPlan: isActive ? (user.subscriptionPlan || 'free') : 'free',
+          subscriptionPlan: isActive ? (plan?.name || user.subscriptionPlan || 'free') : 'free',
+          subscriptionPlanId: plan?._id?.toString() || user.subscriptionPlanId?.toString() || null,
+          downloadAllowed,
           profileLimitCount,
           videoQuality: user.videoQuality || 'auto',
           preferredLanguage: user.preferredLanguage || 'Hindi',
@@ -760,24 +758,7 @@ export const createProfile = async (request: FastifyRequest, reply: FastifyReply
     if (!user) return reply.status(404).send({ success: false, message: 'User not found' });
 
     // Enforce limits
-    let profileLimitCount = 1;
-    const planName = user.subscriptionPlan || 'free';
-    const isActive = user.subscriptionStatus === 'active' && 
-                     (!user.subscriptionExpiry || user.subscriptionExpiry > new Date());
-                     
-    if (isActive && planName !== 'free') {
-      const plan = await SubscriptionPlanModel.findOne({ name: { $regex: new RegExp(`^${planName}$`, 'i') } }).lean();
-      if (plan) {
-        const limit = await PlanLimitModel.findOne({ planId: plan._id }).lean();
-        if (limit) profileLimitCount = limit.profileLimitCount;
-      } else {
-        // Fallback for active premium users if the exact plan name is not found
-        profileLimitCount = 4;
-      }
-    } else if (isActive) {
-      // If they are active but planName is somehow 'free' or empty, give them premium limits as a fallback
-      profileLimitCount = 4;
-    }
+    const { profileLimitCount } = await resolveUserPlanAndLimits(user);
 
     if ((user as any).profiles.length >= profileLimitCount) {
       return reply.status(403).send({ success: false, message: `Profile limit of ${profileLimitCount} reached on your current plan.` });

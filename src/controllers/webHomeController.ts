@@ -32,6 +32,10 @@ const mapContentItem = (item: any, type: 'movie' | 'show', isHero = false) => {
     badge,
     genres: (item.genres || []).map((g: any) => g?.name || g),
     seasons: type === 'show' ? item.seasons || 1 : undefined,
+    downloadAllowed: item.downloadAllowed !== false,
+    videoUrl: item.videoUrl,
+    hlsUrl: item.hlsUrl,
+    trailerUrl: item.trailerUrl,
   };
 };
 
@@ -59,6 +63,10 @@ const mapShortDrama = (item: any, totalEpisodes: number, freeEpisodes: number) =
     year: item.year?.toString() || new Date(item.createdAt).getFullYear().toString(),
     releaseDate: item.createdAt,
     genres: (item.genres || []).map((g: any) => g?.name || g),
+    downloadAllowed: item.downloadAllowed !== false,
+    videoUrl: item.videoUrl,
+    hlsUrl: item.hlsUrl,
+    trailerUrl: item.trailerUrl,
   };
 };
 
@@ -74,7 +82,7 @@ export const getWebHome = async (request: FastifyRequest, reply: FastifyReply) =
     }
 
     // Shared projection to make queries extremely fast
-    const selectFields = 'title description shortDescription thumbnail bannerImage posterImage year rating ageRating duration imdbRating createdAt featured trending isNewContent views genres languages seasons contentType';
+    const selectFields = 'title description shortDescription thumbnail bannerImage posterImage year rating ageRating duration imdbRating createdAt featured trending isNewContent views genres languages seasons contentType downloadAllowed videoUrl hlsUrl trailerUrl';
 
     // Parallel fetching for genres to use in filtering
     const [actionGenre, dramaGenre] = await Promise.all([
@@ -129,6 +137,10 @@ export const getWebHome = async (request: FastifyRequest, reply: FastifyReply) =
               badge: banner.type?.toUpperCase() || 'EXCLUSIVE',
               genres: (content.genres || []).map((g: any) => g?.name || g),
               seasons: type === 'show' && !isDrama ? content.seasons || 1 : undefined,
+              downloadAllowed: content.downloadAllowed !== false,
+              videoUrl: content.videoUrl,
+              hlsUrl: content.hlsUrl,
+              trailerUrl: content.trailerUrl,
             };
           } else {
             // Banner without linked content — use banner's own contentType

@@ -2,6 +2,8 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { UserModel } from '../models/User';
 
+import { resolveUserPlanAndLimits } from '../lib/planHelper';
+
 function docId(doc: any) {
   if (doc._id) { doc.id = String(doc._id); delete doc._id; delete doc.__v; }
   return doc;
@@ -55,8 +57,22 @@ export const getSingleUser = async (request: FastifyRequest, reply: FastifyReply
 
 export const updateSingleUser = async (request: FastifyRequest, reply: FastifyReply) => {
   const { id } = request.params as { id: string };
-  const body = request.body as Record<string, unknown>;
+  const body = request.body as Record<string, any>;
   delete body.passwordHash;
+
+  if (body.subscriptionPlan !== undefined) {
+    if (body.subscriptionPlan === 'free') {
+      body.subscriptionPlanId = null;
+    } else {
+      const { plan } = await resolveUserPlanAndLimits({
+        subscriptionPlan: body.subscriptionPlan,
+        subscriptionStatus: body.subscriptionStatus || 'active',
+      });
+      if (plan) {
+        body.subscriptionPlanId = plan._id;
+      }
+    }
+  }
 
   const doc = await UserModel.findByIdAndUpdate(id, { $set: body }, { returnDocument: 'after' })
     .select('-passwordHash')

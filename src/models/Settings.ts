@@ -15,6 +15,8 @@ export interface ISettings extends Document {
   logoUrl: string;
   darkLogoUrl: string;
   lightLogoUrl: string;
+  darkLogoSize?: number;
+  lightLogoSize?: number;
   faviconUrl: string;
   logoStyle: 'icon' | 'fill';
   loginTitle: string;
@@ -32,12 +34,28 @@ export interface ISettings extends Document {
   mailFrom: string;
   mailFromName: string;
   // Storage
-  storageDriver: 'local' | 's3' | 'bunny';
+  storageDriver: 'local' | 's3' | 'aws' | 'digitalocean' | 'bunny';
   awsAccessKeyId: string;
   awsSecretAccessKey: string;
   awsRegion: string;
   awsBucket: string;
   awsPathStyleEndpoint: boolean;
+  doSpacesAccessKey: string;
+  doSpacesSecretKey: string;
+  doSpacesRegion: string;
+  doSpacesBucket: string;
+  doSpacesEndpoint: string;
+  // Aliases for compatibility
+  doSpaceName?: string;
+  doRegion?: string;
+  doAccessKey?: string;
+  doSecretKey?: string;
+  doEndpoint?: string;
+  digitalOceanSpaceName?: string;
+  digitalOceanRegion?: string;
+  digitalOceanAccessKey?: string;
+  digitalOceanSecretKey?: string;
+  digitalOceanEndpoint?: string;
   bunnyStorageZone: string;
   bunnyAccessKey: string;
   bunnyCdnUrl: string;
@@ -145,6 +163,8 @@ const SettingsSchema = new Schema<ISettings>(
     logoUrl: { type: String, default: 'https://i.imgur.com/45cG5Kc.png' },
     darkLogoUrl: { type: String, default: 'https://i.imgur.com/45cG5Kc.png' },
     lightLogoUrl: { type: String, default: 'https://i.imgur.com/45cG5Kc.png' },
+    darkLogoSize: { type: Number, default: 36 },
+    lightLogoSize: { type: Number, default: 36 },
     faviconUrl: { type: String, default: '' },
     logoStyle: { type: String, enum: ['icon', 'fill'], default: 'fill' },
     loginTitle: { type: String, default: 'Welcome Back' },
@@ -162,12 +182,27 @@ const SettingsSchema = new Schema<ISettings>(
     mailFrom: { type: String, default: 'info@tripleminds.com' },
     mailFromName: { type: String, default: 'The Drama Lock' },
     // Storage
-    storageDriver: { type: String, enum: ['local', 's3', 'bunny'], default: 'local' },
+    storageDriver: { type: String, enum: ['local', 's3', 'aws', 'digitalocean', 'bunny'], default: 'local' },
     awsAccessKeyId: { type: String, default: '' },
     awsSecretAccessKey: { type: String, default: '' },
     awsRegion: { type: String, default: '' },
     awsBucket: { type: String, default: '' },
     awsPathStyleEndpoint: { type: Boolean, default: false },
+    doSpacesAccessKey: { type: String, default: '' },
+    doSpacesSecretKey: { type: String, default: '' },
+    doSpacesRegion: { type: String, default: '' },
+    doSpacesBucket: { type: String, default: '' },
+    doSpacesEndpoint: { type: String, default: '' },
+    doSpaceName: { type: String, default: '' },
+    doRegion: { type: String, default: '' },
+    doAccessKey: { type: String, default: '' },
+    doSecretKey: { type: String, default: '' },
+    doEndpoint: { type: String, default: '' },
+    digitalOceanSpaceName: { type: String, default: '' },
+    digitalOceanRegion: { type: String, default: '' },
+    digitalOceanAccessKey: { type: String, default: '' },
+    digitalOceanSecretKey: { type: String, default: '' },
+    digitalOceanEndpoint: { type: String, default: '' },
     bunnyStorageZone: { type: String, default: '' },
     bunnyAccessKey: { type: String, default: '' },
     bunnyCdnUrl: { type: String, default: '' },

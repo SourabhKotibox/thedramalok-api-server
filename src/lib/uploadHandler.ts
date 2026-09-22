@@ -8,6 +8,7 @@ import { MediaFolderModel } from '../models/MediaFolder';
 import { Types } from 'mongoose';
 import { transcodeToHls } from './hlsTranscoder';
 import { logger } from './logger';
+import { storageService, StorageProviderType } from '../services/storage';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -92,7 +93,7 @@ export interface UploadedFileInfo {
   fileSize: number;
   mimeType: string;
   uploadType: UploadType;
-  storageType?: 'local' | 's3';
+  storageType?: 'local' | 's3' | 'aws' | 'digitalocean';
   s3Key?: string;
 }
 
@@ -166,125 +167,133 @@ export const saveFileFromPart = async (
   }
 
   const fileName = generateUniqueFileName(part.filename);
-  ensureUploadDir(targetDir);
-  const relativeFilePath = path.join(targetDir, fileName);
-  const fullFilePath = path.join(UPLOADS_ROOT, relativeFilePath);
+  const relativeFilePath = path.join(targetDir, fileName).replace(/\\/g, '/');
+  const buffer = await part.toBuffer();
+  const fileSize = buffer.length;
+  const mimeType = part.mimetype || 'application/octet-stream';
+  const contentHash = crypto.createHash('sha256').update(buffer).digest('hex');
 
-  return new Promise(async (resolve, reject) => {
-    const writeStream = fs.createWriteStream(fullFilePath);
-    part.file.pipe(writeStream);
+  // Check deduplication
+  const existingFile = await MediaFileModel.findOne({
+    $or: [
+      { contentHash },
+      { name: part.filename, fileSize }
+    ]
+  });
 
-    writeStream.on('finish', async () => {
-      const stats = fs.statSync(fullFilePath);
+  if (existingFile) {
+    let needsUpdate = false;
+    if (!existingFile.contentHash && contentHash) {
+      existingFile.contentHash = contentHash;
+      needsUpdate = true;
+    }
+    if (options?.contentName && !existingFile.contentName) {
+      existingFile.contentName = options.contentName;
+      needsUpdate = true;
+    }
+    if (options?.contentType && !existingFile.contentType) {
+      existingFile.contentType = options.contentType;
+      needsUpdate = true;
+    }
+    if (needsUpdate) {
+      await existingFile.save().catch(err => console.error("Error updating existing file metadata:", err));
+    }
 
-      const computeFileHash = (filePath: string): Promise<string> => {
-        return new Promise((res, rej) => {
-          const h = crypto.createHash('sha256');
-          const stream = fs.createReadStream(filePath);
-          stream.on('data', (chunk) => h.update(chunk));
-          stream.on('end', () => res(h.digest('hex')));
-          stream.on('error', (err) => rej(err));
-        });
-      };
+    return {
+      originalName: existingFile.name,
+      fileName: path.basename(existingFile.filePath || existingFile.url),
+      filePath: existingFile.filePath || existingFile.url,
+      url: existingFile.url,
+      fileSize: existingFile.fileSize,
+      mimeType: existingFile.fileType,
+      uploadType,
+      storageType: existingFile.storageType as any,
+      s3Key: existingFile.s3Key,
+    };
+  }
 
-      const contentHash = await computeFileHash(fullFilePath).catch(() => '');
+  const activeProviderType = await storageService.getActiveProviderType();
+  const protocol = request.protocol;
+  const host = request.headers.host;
+  const baseUrl = `${protocol}://${host}`;
 
-      const existingFile = await MediaFileModel.findOne({
-        $or: [
-          { contentHash },
-          { name: part.filename, fileSize: stats.size }
-        ]
+  let finalUrl = '';
+  let finalFilePath = '';
+  let s3Key: string | undefined = undefined;
+
+  if (activeProviderType === 'local') {
+    ensureUploadDir(targetDir);
+    const fullFilePath = path.join(UPLOADS_ROOT, relativeFilePath);
+    await fs.promises.writeFile(fullFilePath, buffer);
+
+    finalFilePath = `/uploads/${relativeFilePath}`;
+    finalUrl = `${baseUrl}/uploads/${relativeFilePath}`;
+  } else {
+    // AWS S3 or DigitalOcean Spaces
+    const uploadResult = await storageService.uploadFile(relativeFilePath, buffer, {
+      contentType: mimeType,
+    });
+    finalUrl = uploadResult.url;
+    finalFilePath = uploadResult.filePath || uploadResult.url;
+    s3Key = uploadResult.key;
+
+    // For video files, also write temporary copy for local HLS processing if needed
+    if (isVideoFile(part.filename, mimeType)) {
+      ensureUploadDir(targetDir);
+      const fullFilePath = path.join(UPLOADS_ROOT, relativeFilePath);
+      await fs.promises.writeFile(fullFilePath, buffer).catch(() => {});
+    }
+  }
+
+  const fileInfo: UploadedFileInfo = {
+    originalName: part.filename,
+    fileName,
+    filePath: finalFilePath,
+    url: finalUrl,
+    fileSize,
+    mimeType,
+    uploadType,
+    storageType: activeProviderType as any,
+    s3Key,
+  };
+
+  if (options?.trackInMediaLibrary !== false) {
+    try {
+      const mediaFile = await MediaFileModel.create({
+        name: part.filename,
+        url: fileInfo.url,
+        filePath: fileInfo.filePath,
+        fileSize,
+        fileType: mimeType,
+        folder: resolvedFolderId ? new Types.ObjectId(resolvedFolderId) : undefined,
+        source: options?.source || uploadType.toLowerCase(),
+        sourceId: options?.sourceId ? new Types.ObjectId(options.sourceId) : undefined,
+        contentHash,
+        contentName: options?.contentName,
+        contentType: options?.contentType,
+        storageType: activeProviderType as any,
+        s3Key,
       });
 
-      if (existingFile) {
-        fs.unlinkSync(fullFilePath);
-
-        let needsUpdate = false;
-        if (!existingFile.contentHash && contentHash) {
-          existingFile.contentHash = contentHash;
-          needsUpdate = true;
-        }
-        if (options?.contentName && !existingFile.contentName) {
-          existingFile.contentName = options.contentName;
-          needsUpdate = true;
-        }
-        if (options?.contentType && !existingFile.contentType) {
-          existingFile.contentType = options.contentType;
-          needsUpdate = true;
-        }
-        if (needsUpdate) {
-          await existingFile.save().catch(err => console.error("Error updating existing local file metadata:", err));
-        }
-
-        return resolve({
-          originalName: existingFile.name,
-          fileName: path.basename(existingFile.filePath || existingFile.url),
-          filePath: existingFile.filePath || existingFile.url,
-          url: existingFile.url,
-          fileSize: existingFile.fileSize,
-          mimeType: existingFile.fileType,
-          uploadType,
-          storageType: existingFile.storageType as 'local' | 's3',
-          s3Key: existingFile.s3Key,
-        });
-      }
-
-      const protocol = request.protocol;
-      const host = request.headers.host;
-      const baseUrl = `${protocol}://${host}`;
-
-      const fileInfo: UploadedFileInfo = {
-        originalName: part.filename,
-        fileName,
-        filePath: `/uploads/${relativeFilePath.replace(/\\/g, '/')}`,
-        url: `${baseUrl}/uploads/${relativeFilePath.replace(/\\/g, '/')}`,
-        fileSize: stats.size,
-        mimeType: part.mimetype || 'application/octet-stream',
-        uploadType,
-        storageType: 'local'
-      };
-
-      if (options?.trackInMediaLibrary !== false) {
-        try {
-          const mediaFile = await MediaFileModel.create({
-            name: part.filename,
-            url: fileInfo.url,
-            filePath: fileInfo.filePath,
-            fileSize: stats.size,
-            fileType: part.mimetype || 'application/octet-stream',
-            folder: resolvedFolderId ? new Types.ObjectId(resolvedFolderId) : undefined,
-            source: options?.source || uploadType.toLowerCase(),
-            sourceId: options?.sourceId ? new Types.ObjectId(options.sourceId) : undefined,
-            contentHash,
-            contentName: options?.contentName,
-            contentType: options?.contentType,
-            storageType: 'local'
+      if (isVideoFile(part.filename, mimeType)) {
+        const fullLocalPath = path.join(UPLOADS_ROOT, relativeFilePath);
+        if (fs.existsSync(fullLocalPath)) {
+          transcodeToHls(mediaFile._id.toString(), fullLocalPath, baseUrl).catch(err => {
+            logger.error({ err, mediaFileId: mediaFile._id }, 'Failed to transcode video to HLS');
           });
-
-          if (isVideoFile(part.filename, part.mimetype || '')) {
-            transcodeToHls(mediaFile._id.toString(), fullFilePath, baseUrl).catch(err => {
-              logger.error({ err, mediaFileId: mediaFile._id }, 'Failed to transcode video to HLS (local)');
-            });
-          }
-        } catch (error) {
-          console.error('Failed to track file in media library:', error);
         }
       }
+    } catch (error) {
+      console.error('Failed to track file in media library:', error);
+    }
+  }
 
-      resolve(fileInfo);
-    });
-
-    writeStream.on('error', reject);
-  });
+  return fileInfo;
 };
 
-export const deleteUploadedFile = async (relativeFilePath: string, storageType?: 'local' | 's3') => {
+export const deleteUploadedFile = async (relativeFilePath: string, storageType?: 'local' | 's3' | 'aws' | 'digitalocean' | string) => {
   if (!relativeFilePath) return;
-
-  const fullPath = path.join(UPLOADS_ROOT, relativeFilePath.replace(/^\/*uploads\//, '').replace(/^\/+/, ''));
-  if (fs.existsSync(fullPath)) {
-    fs.unlinkSync(fullPath);
-  }
+  await storageService.deleteFile(relativeFilePath, storageType as StorageProviderType);
 };
 
 export const formatFileSize = (bytes: number): string => {
@@ -304,3 +313,4 @@ export default {
   deleteUploadedFile,
   formatFileSize
 };
+
