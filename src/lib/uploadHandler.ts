@@ -68,7 +68,7 @@ export const UPLOAD_TYPES = {
   },
   MEDIA_LIBRARY: {
     name: 'media-library',
-    allowedExts: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.webm', '.mov', '.mkv', '.avi', '.flv'],
+    allowedExts: ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.mp4', '.webm', '.mov', '.mkv', '.avi', '.flv', '.mp3', '.m4a', '.aac', '.wav', '.ogg', '.oga', '.opus'],
     defaultDir: 'media'
   },
   BANNER: {

@@ -48,6 +48,7 @@ export interface IStory extends Document {
   metaTitle?: string;
   metaDescription?: string;
   seoImage?: string;
+  sortOrder?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -112,6 +113,9 @@ const StorySchema = new Schema<IStory>(
     metaTitle: String,
     metaDescription: String,
     seoImage: String,
+    // Manual display order (ascending). Optional: stories without it keep the legacy newest-first order
+    // and appear before manually ordered ones.
+    sortOrder: { type: Number, index: true },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
